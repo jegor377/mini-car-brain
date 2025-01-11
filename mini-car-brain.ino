@@ -34,7 +34,7 @@
 #define LED_PWM_RESOLUTION 10
 #define LED_PWM_FREQ 100
 #define MAX_LED_DC 1 << LED_PWM_RESOLUTION
-#define MAX_MOTOR_DC
+#define MAX_MOTOR_DC 255
 
 #define CMD_SIZE 14
 #define PROGRAM_CMDS_COUNT 100
@@ -59,6 +59,9 @@
 
 #define MAX_SPEED 1000.0
 
+#define WHEEL_SPAN 76 // mm
+
+#define ROTATION_FACTOR 1
 
 // Check if Bluetooth is available
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
@@ -79,12 +82,13 @@ char cmd[CMD_SIZE], program[PROGRAM_CMDS_COUNT][CMD_SIZE];
 int mode = FREE_CONTROL, instruction = IDLE_INSTRUCTION;
 
 int left_speed, right_speed;
-int desired_rotation, desired_distance;
+int desired_rotation, desired_distance, desired_speed = 100;
 float forward_displacement, rotation_displacement;
 int instruction_iter = 0, set_instructions = 0;
 unsigned long last_time;
 
 bool is_going_forward, is_going_backward;
+bool is_rotating_left, is_rotating_right;
 
 void clear_program() {
   for(int i = 0; i < PROGRAM_CMDS_COUNT; i++) {
@@ -93,17 +97,51 @@ void clear_program() {
 }
 
 void set_left_motors() {
-  // float duty_cycle = abs(left_speed) * MAX_MOTOR_DC;
-  
-  // analogWrite(PWMC_PIN, duty_cycle);
-  // analogWrite(PWMD_PIN, duty_cycle);
+  int duty_cycle = map(abs(left_speed), 0, MAX_SPEED, 0, MAX_MOTOR_DC);
+
+  if(left_speed > 0) { // forward
+    digitalWrite(CIN1_PIN, HIGH);
+    digitalWrite(DIN1_PIN, HIGH);
+    digitalWrite(CIN2_PIN, LOW);
+    digitalWrite(DIN2_PIN, LOW);
+  } else if(left_speed < 0) { // backward
+    digitalWrite(CIN1_PIN, LOW);
+    digitalWrite(DIN1_PIN, LOW);
+    digitalWrite(CIN2_PIN, HIGH);
+    digitalWrite(DIN2_PIN, HIGH);
+  } else { // stop
+    digitalWrite(CIN1_PIN, LOW);
+    digitalWrite(DIN1_PIN, LOW);
+    digitalWrite(CIN2_PIN, LOW);
+    digitalWrite(DIN2_PIN, LOW);
+  }
+
+  analogWrite(PWMC_PIN, duty_cycle);
+  analogWrite(PWMD_PIN, duty_cycle);
 }
 
 void set_right_motors() {
-  // float duty_cycle = abs(right_speed) * MAX_MOTOR_DC;
+  int duty_cycle = map(abs(right_speed), 0, MAX_SPEED, 0, MAX_MOTOR_DC);
 
-  // analogWrite(PWMA_PIN, duty_cycle);
-  // analogWrite(PWMB_PIN, duty_cycle);
+  if(left_speed > 0) { // forward
+    digitalWrite(AIN1_PIN, HIGH);
+    digitalWrite(BIN1_PIN, HIGH);
+    digitalWrite(AIN2_PIN, LOW);
+    digitalWrite(BIN2_PIN, LOW);
+  } else if(left_speed < 0) { // backward
+    digitalWrite(AIN1_PIN, LOW);
+    digitalWrite(BIN1_PIN, LOW);
+    digitalWrite(AIN2_PIN, HIGH);
+    digitalWrite(BIN2_PIN, HIGH);
+  } else { // stop
+    digitalWrite(AIN1_PIN, LOW);
+    digitalWrite(BIN1_PIN, LOW);
+    digitalWrite(AIN2_PIN, LOW);
+    digitalWrite(BIN2_PIN, LOW);
+  }
+
+  analogWrite(PWMA_PIN, duty_cycle);
+  analogWrite(PWMB_PIN, duty_cycle);
 }
 
 void clear_cmd() {
@@ -196,7 +234,37 @@ void loop() {
     float dt = (float)(millis() - last_time) / 1000.0;
     switch(instruction) {
       case ROTATE_INSTRUCTION: {
-        ;
+        if(desired_rotation == 0) {
+          next_instruction();
+          break;
+        }
+
+        if(is_rotating_left || is_rotating_right) {
+          rotation_displacement += ROTATION_FACTOR * 2 * motor_speed(desired_speed) * dt / WHEEL_SPAN;
+
+          if(rotation_displacement >= desired_rotation) {
+            left_speed = 0;
+            right_speed = 0;
+            set_left_motors();
+            set_right_motors();
+            next_instruction();
+            break;
+          }
+        } else {
+          if(desired_rotation > 0) {
+            is_rotating_left = false;
+            is_rotating_right = true;
+            left_speed = desired_speed;
+            right_speed = -desired_speed;
+          } else {
+            is_rotating_left = true;
+            is_rotating_right = false;
+            left_speed = -desired_speed;
+            right_speed = desired_speed;
+          }
+          set_left_motors();
+          set_right_motors();
+        }
       } break;
       case MOVE_INSTRUCTION: {
         if(desired_distance == 0) {
@@ -204,7 +272,7 @@ void loop() {
           break;
         }
         if(is_going_forward || is_going_backward) {
-          forward_displacement += motor_speed(abs(left_speed)) * dt;
+          forward_displacement += motor_speed(desired_speed) * dt;
 
           if(forward_displacement >= desired_distance) {
             left_speed = 0;
@@ -218,10 +286,11 @@ void loop() {
           if(desired_distance > 0) {
             is_going_forward = true;
             is_going_backward = false;
-          } else if(desired_distance < 0) {
+            left_speed = right_speed = desired_speed;
+          } else {
             is_going_forward = true;
             is_going_backward = false;
-            left_speed = right_speed = -left_speed;
+            left_speed = right_speed = -desired_speed;
           }
           set_left_motors();
           set_right_motors();
@@ -272,6 +341,8 @@ void loop() {
       k = sscanf(cmd, "D%d;", &desired_rotation);
       if(k == 1) {
         rotation_displacement = 0;
+        is_rotating_left = false;
+        is_rotating_right = false;
         instruction = ROTATE_INSTRUCTION;
       }
     } break;
@@ -285,10 +356,9 @@ void loop() {
       }
     } break;
     case 'F': {
-      k = sscanf(cmd, "F%d;", &left_speed);
+      k = sscanf(cmd, "F%d;", &desired_speed);
       if(k == 1) {
-        left_speed = abs(constrain(left_speed, -MAX_SPEED, MAX_SPEED));
-        right_speed = left_speed;
+        desired_speed = abs(constrain(desired_speed, -MAX_SPEED, MAX_SPEED));
         next_instruction();
       }
     } break;
@@ -296,6 +366,22 @@ void loop() {
       instruction_iter = 0;
       break;
     }
+    case 'H': {
+      ledcWrite(LED1_PIN, MAX_LED_DC);
+      ledcWrite(LED4_PIN, MAX_LED_DC);
+    } break;
+    case 'I': {
+      ledcWrite(LED1_PIN, 0);
+      ledcWrite(LED4_PIN, 0);
+    } break;
+    case 'J': {
+      digitalWrite(STBY1_PIN, HIGH);
+      digitalWrite(STBY2_PIN, HIGH);
+    } break;
+    case 'K': {
+      digitalWrite(STBY1_PIN, LOW);
+      digitalWrite(STBY2_PIN, LOW);
+    } break;
     default: break;
   }
 
