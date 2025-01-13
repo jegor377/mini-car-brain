@@ -64,6 +64,8 @@
 
 #define ROTATION_FACTOR 2
 
+#define ACC_PULLUP_INTERVAL 50 // ms
+
 // Check if Bluetooth is available
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
 #error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
@@ -84,13 +86,13 @@ int mode = FREE_CONTROL, instruction = IDLE_INSTRUCTION;
 
 int left_speed = 0, right_speed = 0;
 int desired_rotation = 0, desired_distance = 0, desired_speed = 100;
-float forward_displacement, rotation_displacement;
+float forward_displacement, rotation_displacement, forward_measured_velocity = 0.0, back_leds_brightness = 0.0;
 int instruction_iter = 0, set_instructions = 0;
-unsigned long last_time;
+unsigned long last_time, acc_timer;
 
 bool is_going_forward = false, is_going_backward = false;
 bool is_rotating_left = false, is_rotating_right = false;
-bool was_bt_connected = false;
+bool was_bt_connected = false, handle_reverse_leds = false;
 
 void set_left_motors() {
   int duty_cycle = map(abs(left_speed), 0, MAX_SPEED, 0, MAX_MOTOR_DC);
@@ -220,6 +222,7 @@ void setup() {
     Serial.println("No valid sensor found");
     while(1);
   }
+  accel.setRange(ADXL345_RANGE_2_G); 
 
   clear_program();
   last_time = millis();
@@ -243,8 +246,8 @@ void setup() {
 
 void loop() {
   unsigned long now = micros();
+  float dt = (float)(now - last_time) / 1000000.0;
   if(mode == PROGRAM_CONTROL) {
-    float dt = (float)(now - last_time) / 1000000.0;
     switch(instruction) {
       case ROTATE_INSTRUCTION: {
         if(desired_rotation == 0) {
@@ -303,6 +306,7 @@ void loop() {
           } else {
             is_going_forward = true;
             is_going_backward = false;
+            handle_reverse_leds = true;
             left_speed = right_speed = -desired_speed;
           }
           set_left_motors();
@@ -313,7 +317,19 @@ void loop() {
     }
   }
 
+  if(handle_reverse_leds) {
+    if(left_speed < 0 && right_speed < 0 && back_leds_brightness != 1) {
+      back_leds_brightness = min(back_leds_brightness + dt * 0.5, 1.0);
+      ledcWrite(BACK_LEFT_LED_PIN, back_leds_brightness * (float)(MAX_LED_DC));
+      ledcWrite(BACK_RIGHT_LED_PIN, back_leds_brightness * (float)(MAX_LED_DC));
+    } else if(left_speed != 0 && right_speed != 0) {
+      ledcWrite(BACK_LEFT_LED_PIN, 0);
+      ledcWrite(BACK_RIGHT_LED_PIN, 0);
+    }
+  }
+
   if(!was_bt_connected && SerialBT.hasClient()) {
+    handle_reverse_leds = false;
     for(int i = 0; i < HALF_MAX_LED_DC; i++) {
       ledcWrite(FRONT_LEFT_LED_PIN, i);
       ledcWrite(FRONT_RIGHT_LED_PIN, i);
@@ -336,6 +352,7 @@ void loop() {
     SerialBT.println("ready");
     was_bt_connected = true;
   } else if(was_bt_connected && !SerialBT.hasClient()) {
+    handle_reverse_leds = false;
     ledcWrite(FRONT_LEFT_LED_PIN, 0);
     ledcWrite(FRONT_RIGHT_LED_PIN, 0);
     ledcWrite(BACK_LEFT_LED_PIN, 0);
@@ -377,6 +394,7 @@ void loop() {
         if(k == 2) {
           left_speed = constrain(left_speed, -MAX_SPEED, MAX_SPEED);
           right_speed = constrain(right_speed, -MAX_SPEED, MAX_SPEED);
+          handle_reverse_leds = left_speed < 0 && right_speed < 0;
           set_left_motors();
           set_right_motors();
           mode = FREE_CONTROL;
@@ -457,10 +475,21 @@ void loop() {
         }
         next_instruction();
       } break;
+      case 'M': {
+        SerialBT.print(forward_measured_velocity);
+      } break;
       default: break;
     }
   }
-
   clear_cmd(cmd);
+  
+  acc_timer += now - last_time;
+  if(acc_timer >= ACC_PULLUP_INTERVAL) {
+    sensors_event_t event;
+    accel.getEvent(&event);
+    forward_measured_velocity += -event.acceleration.x * ACC_PULLUP_INTERVAL;
+    acc_timer = 0;
+  }
+  
   last_time = now;
 }
