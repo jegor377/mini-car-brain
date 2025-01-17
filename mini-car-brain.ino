@@ -33,8 +33,8 @@
 
 #define LED_PWM_RESOLUTION 10
 #define LED_PWM_FREQ 100
-#define MAX_LED_DC 1 << LED_PWM_RESOLUTION
-#define HALF_MAX_LED_DC MAX_LED_DC >> 1
+#define MAX_LED_DC 1 << LED_PWM_RESOLUTION // Maksymalna wartość duty cycle dla ledów
+#define HALF_MAX_LED_DC MAX_LED_DC >> 1 // Maksymalna wartość duty cycle dla silników
 #define MAX_MOTOR_DC 255
 
 #define CMD_SIZE 14
@@ -62,9 +62,10 @@
 
 #define WHEEL_SPAN 76 / 10 // cm
 
+// być może wzór na obliczanie kąta obrotu nie jest dobry, bo nie uwzględnia, że są 4 koła zamiast 2 więc ten współczynnik ustalony ręcznie to naprawia
 #define ROTATION_FACTOR 2
 
-#define ACC_PULLUP_INTERVAL 50 // ms
+#define ACC_PULL_INTERVAL 50 // ms
 
 // Check if Bluetooth is available
 #if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
@@ -249,12 +250,13 @@ void loop() {
   float dt = (float)(now - last_time) / 1000000.0;
   if(mode == PROGRAM_CONTROL) {
     switch(instruction) {
-      case ROTATE_INSTRUCTION: {
+      case ROTATE_INSTRUCTION: { // obsługa obrotu w trybie wykonywania programu trasy
         if(desired_rotation == 0) {
           next_instruction();
           break;
         }
 
+        // całkowanie prędkości i obliczenie rotacji
         if(is_rotating_left || is_rotating_right) {
           rotation_displacement += rad2deg(ROTATION_FACTOR * 2 * motor_speed(desired_speed) * dt / WHEEL_SPAN);
 
@@ -266,7 +268,7 @@ void loop() {
             next_instruction();
             break;
           }
-        } else {
+        } else { // uruchomienie silników
           if(desired_rotation > 0) {
             is_rotating_left = false;
             is_rotating_right = true;
@@ -282,11 +284,12 @@ void loop() {
           set_right_motors();
         }
       } break;
-      case MOVE_INSTRUCTION: {
+      case MOVE_INSTRUCTION: { // obsługa przemieszczenia w trybie wykonywania programu trasy
         if(desired_distance == 0) {
           next_instruction();
           break;
         }
+        // całkowanie prędkości i obliczenie przemieszczenia
         if(is_going_forward || is_going_backward) {
           forward_displacement += motor_speed(desired_speed) * dt;
 
@@ -298,7 +301,7 @@ void loop() {
             next_instruction();
             break;
           }
-        } else {
+        } else { // uruchomienie silników
           if(desired_distance > 0) {
             is_going_forward = true;
             is_going_backward = false;
@@ -306,9 +309,9 @@ void loop() {
           } else {
             is_going_forward = true;
             is_going_backward = false;
-            handle_reverse_leds = true;
             left_speed = right_speed = -desired_speed;
           }
+          handle_reverse_leds = true;
           set_left_motors();
           set_right_motors();
         }
@@ -317,17 +320,20 @@ void loop() {
     }
   }
 
+  // obsługa zapalenia ledów tylnich przy cofaniu
   if(handle_reverse_leds) {
     if(left_speed < 0 && right_speed < 0 && back_leds_brightness != 1) {
-      back_leds_brightness = min(back_leds_brightness + dt * 0.5, 1.0);
+      back_leds_brightness = min(back_leds_brightness + dt * 2.0, 1.0);
       ledcWrite(BACK_LEFT_LED_PIN, back_leds_brightness * (float)(MAX_LED_DC));
       ledcWrite(BACK_RIGHT_LED_PIN, back_leds_brightness * (float)(MAX_LED_DC));
-    } else if(left_speed != 0 && right_speed != 0) {
+    } else {
       ledcWrite(BACK_LEFT_LED_PIN, 0);
       ledcWrite(BACK_RIGHT_LED_PIN, 0);
+      back_leds_brightness = 0;
     }
   }
 
+  // obsługa zestawienia i utraty połączenia Bluetooth
   if(!was_bt_connected && SerialBT.hasClient()) {
     handle_reverse_leds = false;
     for(int i = 0; i < HALF_MAX_LED_DC; i++) {
@@ -373,15 +379,18 @@ void loop() {
     was_bt_connected = false;
   }
 
+  // obsługa wykonywania komend programu trasy
   if(mode == PROGRAM_CONTROL && instruction == IDLE_INSTRUCTION) {
     strcpy(cmd, next_cmd);
   }
 
+  // obsługa połączenia bluetooth i przysyłanych komend
   if (SerialBT.available()) {
     clear_cmd(cmd);
     SerialBT.readBytesUntil(CMD_TERMINATOR, cmd, CMD_SIZE);
   }
 
+  // obsługa komend i zapisywania komend do programu trasy
   if(mode == PROGRAM_DEFINITION && cmd[0] > 'C' ) {
     if(instruction_iter + 1 < 100) {
       strcpy(program[instruction_iter++], cmd);
@@ -389,25 +398,25 @@ void loop() {
   } else {
     int k;
     switch(cmd[0]) {
-      case 'A': {
+      case 'A': { // tryb swobodnego poruszania się i ustalenie prędkości obrotu kół
         k = sscanf(cmd, "A%d,%d", &left_speed, &right_speed);
         if(k == 2) {
           left_speed = constrain(left_speed, -MAX_SPEED, MAX_SPEED);
           right_speed = constrain(right_speed, -MAX_SPEED, MAX_SPEED);
-          handle_reverse_leds = left_speed < 0 && right_speed < 0;
+          handle_reverse_leds = true;
           set_left_motors();
           set_right_motors();
           mode = FREE_CONTROL;
         }
       } break;
-      case 'B': {
+      case 'B': { // tryb pisania programu trasy
         clear_program();
         mode = PROGRAM_DEFINITION;
         instruction = IDLE_INSTRUCTION;
         instruction_iter = 0;
         Serial.println("Przejscie do trybu programowania");
       } break;
-      case 'C': {
+      case 'C': { // tryb wykonywania programu trasy
         mode = PROGRAM_CONTROL;
         instruction_iter = 0;
         Serial.println("Przejscie do trybu wykonywania programu");
@@ -415,7 +424,7 @@ void loop() {
         Serial.print("Ustawienie nastepnej komendy ");
         Serial.println(next_cmd);
       } break;
-      case 'D': { // rotate
+      case 'D': { // obrót o zadany kąt
         k = sscanf(cmd, "D%d", &desired_rotation);
         if(k == 1) {
           rotation_displacement = 0;
@@ -424,7 +433,7 @@ void loop() {
           instruction = ROTATE_INSTRUCTION;
         }
       } break;
-      case 'E': {
+      case 'E': { // przejechanie zadanego dystansu w przód albo w tył
         k = sscanf(cmd, "E%d", &desired_distance);
         if(k == 1) {
           forward_displacement = 0;
@@ -433,41 +442,41 @@ void loop() {
           instruction = MOVE_INSTRUCTION;
         }
       } break;
-      case 'F': {
+      case 'F': { // ustalenie prędkości w trybie wykonywania programu trasy
         k = sscanf(cmd, "F%d", &desired_speed);
         if(k == 1) {
           desired_speed = abs(constrain(desired_speed, -MAX_SPEED, MAX_SPEED));
           next_instruction();
         }
       } break;
-      case 'G': {
+      case 'G': { // przejście do pierwszej instrukcji w programie trasy
         instruction_iter = -1;
         next_instruction();
         break;
       }
-      case 'H': {
+      case 'H': { // zapalenie świateł przednich
         ledcWrite(FRONT_LEFT_LED_PIN, MAX_LED_DC);
         ledcWrite(FRONT_RIGHT_LED_PIN, MAX_LED_DC);
         Serial.println("Front lights ON");
         next_instruction();
       } break;
-      case 'I': {
+      case 'I': { // zgaszenie świateł przednich
         ledcWrite(FRONT_LEFT_LED_PIN, 0);
         ledcWrite(FRONT_RIGHT_LED_PIN, 0);
         Serial.println("Front lights OFF");
         next_instruction();
       } break;
-      case 'J': {
+      case 'J': { // włączenie układów silników
         digitalWrite(STBY1_PIN, HIGH);
         digitalWrite(STBY2_PIN, HIGH);
         next_instruction();
       } break;
-      case 'K': {
+      case 'K': { // wyłączenie układów silników
         digitalWrite(STBY1_PIN, LOW);
         digitalWrite(STBY2_PIN, LOW);
         next_instruction();
       } break;
-      case 'L': {
+      case 'L': { // wypisanie zapisanych w programie trasy instrukcji do kanału Bluetootha
         for(int i = 0; i < PROGRAM_CMDS_COUNT; i++) {
           if(program[i][0] != ';') {
             SerialBT.println(program[i]);
@@ -475,19 +484,34 @@ void loop() {
         }
         next_instruction();
       } break;
-      case 'M': {
+      case 'M': { // pobranie obliczanej na bieząco prędkości scałkowanej z przyspieszenia odczytanego przez ADXL345
         SerialBT.print(forward_measured_velocity);
+        next_instruction();
+      } break;
+      case 'N': { // zapalenie świateł tylnich
+        handle_reverse_leds = false;
+        ledcWrite(BACK_LEFT_LED_PIN, MAX_LED_DC);
+        ledcWrite(BACK_RIGHT_LED_PIN, MAX_LED_DC);
+        Serial.println("Back lights ON");
+        next_instruction();
+      } break;
+      case 'O': { // zgaszenie świateł tylnich
+        ledcWrite(BACK_LEFT_LED_PIN, 0);
+        ledcWrite(BACK_RIGHT_LED_PIN, 0);
+        Serial.println("Back lights OFF");
+        next_instruction();
       } break;
       default: break;
     }
   }
   clear_cmd(cmd);
   
+  // Pobranie wartości przyspieszenia do przodu pojazdu z ADXL345 i scałkowanie
   acc_timer += now - last_time;
-  if(acc_timer >= ACC_PULLUP_INTERVAL) {
+  if(acc_timer >= ACC_PULL_INTERVAL) {
     sensors_event_t event;
     accel.getEvent(&event);
-    forward_measured_velocity += -event.acceleration.x * ACC_PULLUP_INTERVAL;
+    forward_measured_velocity += -event.acceleration.x * ACC_PULL_INTERVAL;
     acc_timer = 0;
   }
   
